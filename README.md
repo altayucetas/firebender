@@ -47,14 +47,12 @@ firebender:
 ```
 cd firebender
 sudo RUST_LOG=info cargo run
-
 ```
 
 firebender-ui:
 ```
 cd firebender-ui
 python3 -m http.server 8000
-
 ```
 
 Then, you can start using the application from the web interface by going to ```http://127.0.0.1:8000```.
