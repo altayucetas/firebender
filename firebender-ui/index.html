@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firebender Control Panel</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.2.1/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.7.0/lib/xterm-addon-fit.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f0f2f5; color: #1c1e21; margin: 0; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1, h2 { color: #1877f2; }
+        button { background-color: #1877f2; color: white; border: none; padding: 10px 15px; border-radius: 6px; cursor: pointer; font-size: 16px; }
+        button:hover { background-color: #166fe5; }
+        button:active { background-color: #1465d1; }
+        button:disabled { background-color: #a0a0a0; cursor: not-allowed; }
+        .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .controls label { font-weight: bold; }
+        .controls input[type="number"] { padding: 8px; border-radius: 6px; border: 1px solid #ddd; width: 60px; }
+        #log-output { background-color: #e7f3ff; border-left: 4px solid #1877f2; padding: 10px; margin-top: 20px; font-family: monospace; white-space: pre-wrap; word-break: break-all; }
+        .workstation { border: 1px solid #ddd; border-radius: 6px; padding: 15px; margin-top: 10px; background: #fafafa; }
+        .workstation p { margin: 5px 0; }
+        .workstation code { background: #e0e0e0; padding: 2px 5px; border-radius: 4px; }
+        .delete-btn { background-color: #e74c3c; }
+        .delete-btn:hover { background-color: #c0392b; }
+        .terminal-btn { background-color: #27ae60; margin-left: 10px; }
+        .terminal-btn:hover { background-color: #219d55; }
+        
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); }
+        .modal-content { background-color: #202020; margin: 5% auto; padding: 20px; border-radius: 8px; width: 80%; height: 70%; display: flex; flex-direction: column; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; color: white; margin-bottom: 10px; }
+        .close-btn { color: white; font-size: 24px; cursor: pointer; }
+        #terminal-container { flex: 1; background-color: #202020; border-radius: 4px; overflow: hidden; }
+
+        .advanced-toggle-btn { background-color: transparent; color: #1877f2; border: 1px solid #ddd; font-size: 14px; padding: 5px 10px; margin-left: 15px; }
+        .advanced-toggle-btn:hover { background-color: #e7f3ff; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>🔥 Firebender Control Panel</h1>
+        
+        <div class="controls">
+            <label for="vcpu-input">vCPUs:</label>
+            <input type="number" id="vcpu-input" value="1" min="1" max="8">
+            
+            <label for="memory-input">Memory (MiB):</label>
+            <input type="number" id="memory-input" value="512" min="128" step="128">
+
+            <button id="toggle-advanced-btn" class="advanced-toggle-btn">Advanced Settings</button>
+        </div>
+
+        <div id="advanced-options" class="controls" style="display: none; margin-top: 10px;">
+            <input type="checkbox" id="smt-input">
+            <label for="smt-input">SMT (Hyper-Threading)</label>
+
+            <input type="checkbox" id="read-only-input" style="margin-left: 15px;">
+            <label for="read-only-input">Read-Only Filesystem</label>
+
+            <label for="bandwidth-limit-input" style="margin-left: 15px;">Bandwidth (Mbit/s):</label>
+            <input type="number" id="bandwidth-limit-input" value="0" min="0">
+        </div>
+
+        <div class="controls" style="margin-top: 20px;">
+            <button id="create-btn">Create New Workstation</button>
+            <button id="refresh-btn">Refresh List</button>
+        </div>
+        
+        <div id="log-output">Status messages will appear here...</div>
+        
+        <h2>Active Workstations</h2>
+        <div id="workstations-list"></div>
+    </div>
+
+    <div id="terminal-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="terminal-title">SSH Terminal Connection</h3>
+                <span class="close-btn" id="close-terminal">&times;</span>
+            </div>
+            <div id="terminal-container"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://127.0.0.1:3000/workstations';
+
+        const createBtn = document.getElementById('create-btn');
+        const refreshBtn = document.getElementById('refresh-btn');
+        const workstationsListDiv = document.getElementById('workstations-list');
+        const logOutputDiv = document.getElementById('log-output');
+        const terminalModal = document.getElementById('terminal-modal');
+        const closeTerminalBtn = document.getElementById('close-terminal');
+        const terminalTitle = document.getElementById('terminal-title');
+        const terminalContainer = document.getElementById('terminal-container');
+        
+        let terminal;
+        let terminalSocket;
+        let currentWorkstationId;
+        let fitAddon;
+
+        function log(message) {
+            console.log(message);
+            logOutputDiv.textContent = message;
+        }
+
+        function renderWorkstations(workstations) {
+            workstationsListDiv.innerHTML = ''; 
+
+            if (workstations.length === 0) {
+                workstationsListDiv.innerHTML = '<p>No active workstations found.</p>';
+                return;
+            }
+
+            workstations.forEach(ws => {
+                const wsElement = document.createElement('div');
+                wsElement.className = 'workstation';
+                wsElement.innerHTML = `
+                    <p><strong>ID:</strong> ${ws.id}</p>
+                    <p><strong>IP Address:</strong> <code>${ws.ip_address}</code></p>
+                    <p><strong>CPU:</strong> ${ws.vcpu_count} vCPU</p>
+                    <p><strong>RAM:</strong> ${ws.mem_size_mib} MB</p>
+                    <p><strong>SMT Enabled:</strong> ${ws.smt_enabled ? 'Yes' : 'No'}</p>
+                    <p><strong>Read-Only Filesystem:</strong> ${ws.read_only ? 'Yes' : 'No'}</p>
+                    <p><strong>Bandwidth:</strong> ${ws.bandwidth > 0 ? ws.bandwidth + ' Mbit/s' : 'Not limited'}</p>
+                    <div>
+                        <button class="delete-btn" data-id="${ws.id}" data-order="${ws.order}">Delete Workstation</button>
+                        <button class="terminal-btn" data-id="${ws.id}" data-ip="${ws.ip_address}">Connect to Terminal</button>
+                    </div>
+                `;
+                workstationsListDiv.appendChild(wsElement);
+            });
+        }
+
+        async function fetchWorkstations() {
+            log('Refreshing workstation list...');
+            try {
+                const response = await fetch(API_URL);
+                if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+                const workstations = await response.json();
+                renderWorkstations(workstations);
+                log(`Found ${workstations.length} workstations.`);
+            } catch (error) {
+                log(`Error fetching workstations: ${error.message}. Is the backend running?`);
+                renderWorkstations([]);
+            }
+        }
+
+        async function createWorkstation() {
+            log('Sending request to create a new workstation...');
+            createBtn.disabled = true;
+
+            const vcpuInput = document.getElementById('vcpu-input');
+            const memoryInput = document.getElementById('memory-input');
+            const smtInput = document.getElementById('smt-input');
+            const readOnlyInput = document.getElementById('read-only-input');
+            const bandwidthInput = document.getElementById('bandwidth-limit-input');
+
+            const vcpuCount = parseInt(vcpuInput.value, 10);
+            const memSizeMib = parseInt(memoryInput.value, 10);
+            const smtEnabled = smtInput.checked;
+            const readOnly = readOnlyInput.checked;
+            const bandwidth = parseInt(bandwidthInput.value, 10);
+
+            const payload = {
+                vcpu_count: vcpuCount,
+                mem_size_mib: memSizeMib,
+                smt_enabled: smtEnabled,
+                read_only: readOnly,
+                bandwidth: bandwidth,
+            };
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(`HTTP error! Status: ${response.status} - ${errData.error}`);
+                }
+                const newWs = await response.json();
+                log(`Successfully created a workstation (${vcpuCount} vCPU, ${memSizeMib}MB RAM), SMT: ${smtEnabled}, Read-Only: ${readOnly}, Bandwidth: ${bandwidth} with IP: ${newWs.ip_address}`);
+                await fetchWorkstations();
+            } catch (error) {
+                log(`Error creating workstation: ${error.message}`);
+            } finally {
+                createBtn.disabled = false;
+            }
+        }
+        
+        async function deleteWorkstation(id) {
+            log(`Sending request to delete workstation ${id}...`);
+            try {
+                const response = await fetch(`${API_URL}/${id}`, { method: 'DELETE' });
+                if (!response.ok) throw new Error(`HTTP error! Status: ${response.status}`);
+                log(`Successfully initiated deletion for workstation ${id}.`);
+                await fetchWorkstations();
+            } catch (error) {
+                log(`Error deleting workstation: ${error.message}`);
+            }
+        }
+        
+        function initTerminal() {
+            if (terminal) {
+                terminal.dispose();
+            }
+            
+            terminal = new Terminal({
+                cursorBlink: true,
+                convertEol: true,
+                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                fontSize: 14,
+                theme: {
+                    background: '#1E1E1E', foreground: '#F8F8F8', cursor: '#FFFFFF',
+                    black: '#000000', red: '#FF3333', green: '#33FF33', yellow: '#FFFF33',
+                    blue: '#3333FF', magenta: '#FF33FF', cyan: '#33FFFF', white: '#F0F0F0',
+                },
+                allowTransparency: false
+            });
+            
+            fitAddon = new FitAddon.FitAddon();
+            terminal.loadAddon(fitAddon);
+            
+            terminal.open(terminalContainer);
+            fitAddon.fit();
+            
+            window.addEventListener('resize', () => {
+                if (terminalModal.style.display === 'block') {
+                    fitAddon.fit();
+                    if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+                        const dimensions = { cols: terminal.cols, rows: terminal.rows };
+                        terminalSocket.send(JSON.stringify({ type: 'resize', data: dimensions }));
+                    }
+                }
+            });
+        }
+
+        function connectToTerminal(workstationId, ipAddress) {
+            terminalModal.style.display = 'block';
+            currentWorkstationId = workstationId;
+            terminalTitle.textContent = `SSH Terminal: ${ipAddress}`;
+            
+            initTerminal();
+            
+            terminal.writeln('Connecting to SSH terminal...');
+            
+            const wsUrl = `ws://127.0.0.1:3000/ws/workstations/${workstationId}/terminal`;
+            terminalSocket = new WebSocket(wsUrl);
+            
+            let isConnectionReady = false;
+            
+            terminalSocket.onopen = () => {
+                terminal.writeln('WebSocket connection established. Initializing SSH session...');
+                setTimeout(() => { isConnectionReady = true; }, 1500);
+            };
+            
+            terminalSocket.onmessage = (event) => {
+                terminal.write(event.data);
+            };
+            
+            terminalSocket.onerror = (error) => {
+                terminal.writeln(`\r\nWebSocket error occurred. Please try reconnecting.`);
+                isConnectionReady = false;
+            };
+            
+            terminalSocket.onclose = () => {
+                terminal.writeln('\r\nConnection closed');
+                isConnectionReady = false;
+            };
+            
+            terminal.onData(data => {
+                if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN && isConnectionReady) {
+                    terminalSocket.send(data);
+                }
+            });
+            
+            setTimeout(() => { fitAddon.fit(); }, 100);
+        }
+
+        function closeTerminal() {
+            if (terminalSocket) {
+                terminalSocket.close();
+                terminalSocket = null;
+            }
+            terminalModal.style.display = 'none';
+            currentWorkstationId = null;
+        }
+        
+        const toggleAdvancedBtn = document.getElementById('toggle-advanced-btn');
+        const advancedOptionsDiv = document.getElementById('advanced-options');
+
+        toggleAdvancedBtn.addEventListener('click', () => {
+            const isHidden = advancedOptionsDiv.style.display === 'none';
+            if (isHidden) {
+                advancedOptionsDiv.style.display = 'flex';
+                toggleAdvancedBtn.textContent = 'Hide Settings';
+            } else {
+                advancedOptionsDiv.style.display = 'none';
+                toggleAdvancedBtn.textContent = 'Advanced Settings';
+            }
+        });
+
+        createBtn.addEventListener('click', createWorkstation);
+        refreshBtn.addEventListener('click', fetchWorkstations);
+        closeTerminalBtn.addEventListener('click', closeTerminal);
+
+        workstationsListDiv.addEventListener('click', (event) => {
+            if (event.target && event.target.classList.contains('delete-btn')) {
+                const workstationId = event.target.dataset.id;
+                if (confirm(`Are you sure you want to delete workstation ${workstationId}?`)) {
+                    deleteWorkstation(workstationId);
+                }
+            }
+            else if (event.target && event.target.classList.contains('terminal-btn')) {
+                const workstationId = event.target.dataset.id;
+                const ipAddress = event.target.dataset.ip;
+                connectToTerminal(workstationId, ipAddress);
+            }
+        });
+
+        window.addEventListener('click', (event) => {
+            if (event.target === terminalModal) {
+                closeTerminal();
+            }
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && terminalModal.style.display === 'block') {
+                closeTerminal();
+            }
+        });
+
+        fetchWorkstations();
+
+    </script>
+</body>
+</html>
