@@ -23,6 +23,31 @@ The tool provides a complete lifecycle for virtual workstations:
 
 **Note 5**: The current state of active workstations is stored in-memory. Restarting the backend server will lose track of all running VMs.
 
+**Note 6**: To enable an SSH connection to the server, SSH configurations must be made to the filesystem. Additionally, if the server needs to be able to access the internet, the following commands must be run.
+```
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -o ens33 -j MASQUERADE
+```
+
+**Note 7**: To start SSH, data must be written to some files, but this cannot be done on read-only workstations. Therefore, the following script has been added to the ```/sbin/readonly-init``` file in the filesystem. This allows SSH connections to be established on read-only workstations.
+```
+#!/bin/sh
+# Mount necessary tmpfs directories for SSH
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /var/run
+mount -t tmpfs tmpfs /var/log
+
+# Create directory for SSH
+mkdir -p /var/run/sshd
+chmod 755 /var/run/sshd
+
+# Start SSH daemon
+/usr/sbin/sshd
+
+# Continue with normal boot
+exec /sbin/init
+```
+
 The flow of the program is as follows.
 
 ### 1. API Request & VM Preparation
